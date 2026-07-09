@@ -119,6 +119,18 @@
         let BRAND_NAME = _setup ? (_setup.brand || '我的賣場') : '我的賣場';
         let FIREBASE_OK = false;
 
+        // ✅ 登入設定（品牌/PIN/LINE）雲端同步 —— 所有裝置共用同一組，不再各裝置各自一份
+        // 文件位置：artifacts/{appId}/public/data/settings/loginConfig
+        const loginConfigRef = () => doc(db, 'artifacts', appId, 'public', 'data', 'settings', 'loginConfig');
+        // 套用雲端設定：更新全域變數 + 寫回本機快取（離線時還能用最後一次成功讀到的值）
+        const applyCloudSetup = (cfg) => {
+            if (!cfg) return;
+            if (cfg.pin) ADMIN_PIN = cfg.pin;
+            if (cfg.brand) BRAND_NAME = cfg.brand;
+            if (cfg.line) LINE_OA_ID = cfg.line;
+            saveSetup(cfg);
+        };
+
         try {
             if (firebaseConfig.apiKey && !firebaseConfig.apiKey.includes('請填入')) {
                 app = initializeApp(firebaseConfig);
@@ -343,6 +355,10 @@
           const [newBankCode, setNewBankCode] = useState('');
           const [newBankAccount, setNewBankAccount] = useState('');
           const [newBankHolder, setNewBankHolder] = useState('');
+          // ✅ 新增：變更登入 PIN（雲端同步，所有裝置共用）
+          const [newLoginPin, setNewLoginPin] = useState('');
+          const [newLoginPinConfirm, setNewLoginPinConfirm] = useState('');
+          const [savingPin, setSavingPin] = useState(false);
 
           // ✅ 促銷活動 state
           const [promotion, setPromotion] = useState({
@@ -2764,6 +2780,54 @@
                         </button>
                     </div>
 
+                    {/* ✅ 變更登入 PIN（雲端同步，所有裝置共用同一組） */}
+                    <div className="bg-white rounded-[2.5rem] p-8 border border-white space-y-4 mt-4">
+                        <h3 className="font-bold text-[#555555] text-xs tracking-widest uppercase flex items-center gap-2">
+                            <Lock size={14}/> 變更登入 PIN
+                        </h3>
+                        <p className="text-[10px] text-[#6B6B6B] font-bold -mt-2">
+                            💡 改完後，所有裝置（含買家自己的手機）下次登入都要用新 PIN，不會再各裝置各自一份
+                        </p>
+                        <div className="grid grid-cols-2 gap-3">
+                            <input
+                                type="password" inputMode="numeric"
+                                value={newLoginPin}
+                                onChange={e => setNewLoginPin(e.target.value.replace(/\D/g, ''))}
+                                placeholder="新 PIN（4-6碼）"
+                                className="w-full py-4 px-4 bg-[#F5F1EA] rounded-2xl text-xs font-bold outline-none"
+                            />
+                            <input
+                                type="password" inputMode="numeric"
+                                value={newLoginPinConfirm}
+                                onChange={e => setNewLoginPinConfirm(e.target.value.replace(/\D/g, ''))}
+                                placeholder="再次輸入新 PIN"
+                                className="w-full py-4 px-4 bg-[#F5F1EA] rounded-2xl text-xs font-bold outline-none"
+                            />
+                        </div>
+                        <button
+                            disabled={savingPin}
+                            onClick={async () => {
+                                if (!/^\d{4,6}$/.test(newLoginPin)) { showMessage("PIN 需為 4-6 位數字 ❌", 'error'); return; }
+                                if (newLoginPin !== newLoginPinConfirm) { showMessage("兩次輸入的 PIN 不一致 ❌", 'error'); return; }
+                                if (!user) { showMessage("尚未連線雲端 ⚠️", 'error'); return; }
+                                setSavingPin(true);
+                                try {
+                                    const cfg = { brand: BRAND_NAME, pin: newLoginPin, line: LINE_OA_ID };
+                                    await setDoc(loginConfigRef(), cfg);
+                                    applyCloudSetup(cfg);
+                                    setNewLoginPin(''); setNewLoginPinConfirm('');
+                                    showMessage("PIN 已更新 ✅ 所有裝置下次登入請用新密碼");
+                                } catch (err) {
+                                    showMessage("更新失敗：" + (err.message || err.code || "請確認網路"), 'error');
+                                } finally {
+                                    setSavingPin(false);
+                                }
+                            }}
+                            className="w-full py-4 bg-[#333] text-white rounded-2xl text-xs font-bold shadow-lg active:scale-95 transition-all disabled:opacity-50">
+                            {savingPin ? '更新中...' : '更新 PIN'}
+                        </button>
+                    </div>
+
                     {/* ✅ 促銷活動管理 */}
                     <div className="bg-white rounded-[2.5rem] p-6 border border-white space-y-4 mt-4">
                         <div className="flex items-center justify-between">
@@ -3496,16 +3560,28 @@
             const [line, setLine] = useState('');
             const [error, setError] = useState('');
 
-            const handleFinish = () => {
+            const [saving, setSaving] = useState(false);
+
+            const handleFinish = async () => {
                 if (!brand.trim()) { setError('請輸入品牌名稱'); setStep(1); return; }
                 if (!/^\d{4,6}$/.test(pin)) { setError('PIN 需為 4-6 位數字'); return; }
                 if (pin !== pinConfirm) { setError('兩次 PIN 不一致'); return; }
-                saveSetup({
+                const cfg = {
                     brand: brand.trim(),
                     pin,
                     line: line.trim().replace(/^@/, '') || '546hbnos'
-                });
-                onComplete();
+                };
+                setSaving(true);
+                try {
+                    // ✅ 寫入雲端，之後所有裝置都會用這組設定登入，不會再各裝置各自一份
+                    await setDoc(loginConfigRef(), cfg);
+                    applyCloudSetup(cfg);
+                    onComplete();
+                } catch (err) {
+                    setError('儲存到雲端失敗，請檢查網路後再試一次：' + (err.message || err.code || ''));
+                } finally {
+                    setSaving(false);
+                }
             };
 
             return (
@@ -3574,8 +3650,9 @@
                                     </button>
                                     <button
                                         onClick={handleFinish}
-                                        className="flex-1 py-4 bg-[#333] text-white rounded-2xl text-xs font-bold tracking-widest uppercase shadow-lg active:scale-95 transition-all">
-                                        完成設定
+                                        disabled={saving}
+                                        className="flex-1 py-4 bg-[#333] text-white rounded-2xl text-xs font-bold tracking-widest uppercase shadow-lg active:scale-95 transition-all disabled:opacity-50">
+                                        {saving ? '儲存中...' : '完成設定'}
                                     </button>
                                 </div>
                             </>
@@ -3607,10 +3684,39 @@
         const Root = () => {
             const [, forceUpdate] = useState(0);
             const refresh = () => forceUpdate(n => n + 1);
+            // ✅ 登入設定改讀雲端：undefined=載入中、null=雲端尚未設定過、object=已設定（所有裝置共用）
+            const [cloudConfig, setCloudConfig] = useState(undefined);
+
+            useEffect(() => {
+                if (!FIREBASE_OK) return;
+                let unsubDoc = () => {};
+                signInAnonymously(auth).catch(() => {});
+                const unsubAuth = onAuthStateChanged(auth, (u) => {
+                    if (!u) return;
+                    unsubDoc();
+                    unsubDoc = onSnapshot(loginConfigRef(), (d) => {
+                        if (d.exists()) {
+                            const data = d.data();
+                            applyCloudSetup(data);
+                            setCloudConfig(data);
+                        } else {
+                            setCloudConfig(null);
+                        }
+                    }, () => setCloudConfig(null));
+                });
+                return () => { unsubAuth(); unsubDoc(); };
+            }, []);
 
             if (!FIREBASE_OK) return <NotConfigured/>;
             if (!isLicensed()) return <LicensePage onActivated={refresh}/>;
-            if (!loadSetup()) return <SetupWizard onComplete={refresh}/>;
+            if (cloudConfig === undefined) {
+                return (
+                    <div className="min-h-screen flex items-center justify-center bg-[#FAF7F2]">
+                        <Loader2 size={28} className="text-[#B8A582] animate-spin"/>
+                    </div>
+                );
+            }
+            if (cloudConfig === null) return <SetupWizard onComplete={refresh}/>;
             return <App/>;
         };
 
